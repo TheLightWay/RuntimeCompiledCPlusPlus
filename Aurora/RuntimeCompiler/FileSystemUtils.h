@@ -29,8 +29,12 @@
 #ifdef _WIN32
 	#include <direct.h>
     #include <sys/utime.h>
+#ifndef WIN32_LEAN_AND_MEAN
 	#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
     #define NOMINMAX
+#endif
     #include <windows.h>
 	#undef GetObject
     #undef GetCurrentTime
@@ -83,6 +87,7 @@ namespace FileSystemUtils
 		bool        IsDirectory()       const;
 		bool		CreateDir()			const;
 		bool		Remove()			const;
+		bool		RemoveDir()         const; // The directory must be empty, and it must not be the current working directory or the root directory.
 		filetime_t	GetLastWriteTime()	const;
         void        SetLastWriteTime( filetime_t time_ ) const;
 		uint64_t	GetFileSize()		const;
@@ -101,6 +106,8 @@ namespace FileSystemUtils
 
 		// For fopen of utf-8 & long filenames on windows (on other OS returns unaltered copy).
 		Path GetOSShortForm()            const;
+
+		bool Rename( Path newName_ );
 
 		// replaces extension if one exists, or adds it if not
 		void ReplaceExtension( const std::string& ext );
@@ -390,6 +397,39 @@ namespace FileSystemUtils
 #endif
 		if( !error )
 		{
+			return true;
+		}
+		return false;
+	}
+
+	// RemoveDir -  The directory must be empty, and it must not be the current working directory or the root directory.
+	inline bool		Path::RemoveDir()			const
+	{
+#ifdef _WIN32
+		std::wstring temp = _Win32Utf8ToUtf16( m_string );
+		int error = _wrmdir( temp.c_str() );
+#else
+		int error = rmdir( c_str() );
+#endif
+		if( !error )
+		{
+			return true;
+		}
+		return false;
+	}
+
+	inline bool		Path::Rename( Path newName_  )
+	{
+#ifdef _WIN32
+		std::wstring oldname = _Win32Utf8ToUtf16( m_string );
+		std::wstring newname = _Win32Utf8ToUtf16( newName_.m_string );
+		int error = _wrename( oldname.c_str(), newname.c_str() );
+#else
+		int error = rename( c_str(), newName_.c_str() );
+#endif
+		if( !error )
+		{
+			m_string = newName_.m_string;
 			return true;
 		}
 		return false;
