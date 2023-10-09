@@ -19,7 +19,7 @@
 
 // the templates used for tracking need not be optimized
 // so we create macros to handle this
-#ifdef _WIN32
+#if defined _WIN32 && !defined __clang__
 	#define RCCPP_OPTMIZE_OFF __pragma( optimize( "", off ) )
 	#define RCCPP_OPTMIZE_ON  __pragma( optimize( "", on ) )
 #else
@@ -94,7 +94,7 @@ template< size_t COUNT > struct RuntimeTracking : IRuntimeTracking
 
 	virtual RuntimeTackingInfo GetTrackingInfo( size_t Num_ ) const
 	{
-		return GetTrackingInfoFunc<COUNT-1>( Num_ );
+		return GetTrackingInfoFunc<COUNT>( Num_ );
 	}
 };
 

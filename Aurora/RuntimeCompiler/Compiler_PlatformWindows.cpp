@@ -258,13 +258,30 @@ void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToComp
 
 
 
-char* pCharTypeFlags = "";
 #ifdef UNICODE
-	pCharTypeFlags = "/D UNICODE /D _UNICODE ";
+	const char* pCharTypeFlags = "/D UNICODE /D _UNICODE ";
+#else
+	const char* pCharTypeFlags = "";
 #endif
 
+	std::string compilerLocation = compilerOptions_.compilerLocation.m_string;
+    if (compilerLocation.size()==0){
+#if defined __clang__
+	#ifndef _WIN64
+	std::string arch = "-m32 ";
+	#else
+	std::string arch = "-m64 ";
+	#endif
+	compilerLocation = "\"%VCINSTALLDIR%Tools\\Llvm\\bin\\clang-cl\" ";
+	compilerLocation += arch;
+#else
+	// full path and arch is not required as cl compiler already initialized by Vcvarsall.bat
+	compilerLocation = "cl ";
+#endif
+	}
+
 	// /MP - use multiple processes to compile if possible. Only speeds up compile for multiple files and not link
-	std::string cmdToSend = "cl " + flags + pCharTypeFlags
+	std::string cmdToSend = compilerLocation + flags + pCharTypeFlags
 		+ " /MP /Fo\"" + compilerOptions_.intermediatePath.m_string + "\\\\\" "
 		+ "/D WIN32 /EHa /Fe" + moduleName_.m_string;
 	cmdToSend += " " + strIncludeFiles + " " + strFilesToCompile + strLinkLibraries + linkOptions
@@ -283,7 +300,8 @@ struct VSKey
 
 struct VSVersionDiscoveryInfo
 {
-	const char* valueName;
+	const char* versionName;
+	const char* versionNextName; // vswhere query requires a range, so we need the 'next' version name - store rather than use +1 in array as may not exist or be correct
 	int         versionKey; // index into an array of VSKey values for the key, -1 for don't look
 	bool        tryVSWhere; // can use VSWhere for versioning
 };
@@ -299,14 +317,17 @@ void GetPathsOfVisualStudioInstalls( std::vector<VSVersionInfo>* pVersions, ICom
 
     // supporting: VS2005, VS2008, VS2010, VS2011, VS2013, VS2015, VS2017, VS2019
 	// See https://en.wikipedia.org/wiki/Microsoft_Visual_C%2B%2B#Internal_version_numbering for version info
-	VSVersionDiscoveryInfo VS_DISCOVERY_INFO[] = { {"8.0",0,false}, {"9.0",0,false}, {"10.0",0,false}, {"11.0",0,false}, {"12.0",0,false}, {"14.0",0,false}, {"15.0",1,true}, {"16.0",1,true} };
+	VSVersionDiscoveryInfo VS_DISCOVERY_INFO[] = { {"8.0","9.0",0,false}, {"9.0","10.0",0,false}, {"10.0","11.0",0,false}, {"11.0","12.0",0,false}, {"12.0","13.0",0,false}, {"14.0","15.0",0,false}, {"15.0","16.0",1,true}, {"16.0","17.0",1,true}, {"17.0","18.0",1,true} };
 
 
 	int NUMNAMESTOCHECK = sizeof( VS_DISCOVERY_INFO ) / sizeof( VSVersionDiscoveryInfo );
     // we start searching for a compatible compiler from the current version backwards
     int startVersion = NUMNAMESTOCHECK - 1;
+
+#if !defined __clang__ // do not check _MSC_VER for clang as this reports version 1800 by default
 	//switch around prefered compiler to the one we've used to compile this file
 	const unsigned int MSCVERSION = _MSC_VER;
+	bool bMSCVersionFound = true; // default to true as only one false case
 	switch( MSCVERSION )
 	{
 	case 1400:	//VS 2005
@@ -344,15 +365,22 @@ void GetPathsOfVisualStudioInstalls( std::vector<VSVersionInfo>* pVersions, ICom
 	case 1925: // VS 2019
 	case 1926: // VS 2019
 	case 1927: // VS 2019
+	case 1928: // VS 2019
+	case 1929: // VS 2019
 		startVersion = 7;
 		break;
+	case 1930: // VS 2022
+	case 1931: // VS 2022
+		startVersion = 8;
+		break;
 	default:
+		bMSCVersionFound = false;
 		if( pLogger )
 		{
-			pLogger->LogWarning("WARNING: VS Compiler with _MSC_VER %d potentially not supported. Defaulting to version %s.\n",MSCVERSION, VS_DISCOVERY_INFO[startVersion].valueName);
+			pLogger->LogWarning("WARNING: VS Compiler with _MSC_VER %d potentially not supported. Defaulting to version %s.\n",MSCVERSION, VS_DISCOVERY_INFO[startVersion].versionName);
 		}
 	}
-
+#endif
 
 
 	char value[MAX_PATH];
@@ -389,8 +417,18 @@ void GetPathsOfVisualStudioInstalls( std::vector<VSVersionInfo>* pVersions, ICom
 				cmdProc.InitialiseProcess();
 				cmdProc.m_bStoreCmdOutput = true;
 				cmdProc.m_CmdOutput = "";
+				std::string maxVersion;
+				if( !bMSCVersionFound && i == startVersion )
+				{
+					// open ended max version so we find the latest
+					maxVersion =  "";
+				}
+				else
+				{
+					maxVersion =  vsinfo.versionNextName;
+				}
 				std::string vsWhereQuery = "\"%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere\""
-					                         " -version " + std::string( vsinfo.valueName ) + 
+					                         " -version [" + std::string( vsinfo.versionName ) + "," + maxVersion + ") "          // [min,max) format for version names
 					                         " -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
 					                         " -property installationPath"
 							                 "\nexit\n";
@@ -420,7 +458,7 @@ void GetPathsOfVisualStudioInstalls( std::vector<VSVersionInfo>* pVersions, ICom
 
 		    LONG retVal = RegQueryValueExA(
 				          vskey.key,					//__in         HKEY hKey,
-					      vsinfo.valueName,	//__in_opt     LPCTSTR lpValueName,
+					      vsinfo.versionName,	//__in_opt     LPCTSTR lpValueName,
 					      NULL,					//__reserved   LPDWORD lpReserved,
 					      NULL ,				//__out_opt    LPDWORD lpType,
 					      (LPBYTE)value,			//__out_opt    LPBYTE lpData,
@@ -616,7 +654,7 @@ void CmdProcess::InitialiseProcess()
 	}
 	*/
 
-	wchar_t* pCommandLine = L"cmd /q /K @PROMPT $";
+	const wchar_t* pCommandLine = L"cmd /q /K @PROMPT $";
 	//CreateProcessW won't accept a const pointer, so copy to an array 
 	wchar_t pCmdLineNonConst[1024];
 	wcscpy_s(pCmdLineNonConst, pCommandLine);
