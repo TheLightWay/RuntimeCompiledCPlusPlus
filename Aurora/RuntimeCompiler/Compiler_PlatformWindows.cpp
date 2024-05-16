@@ -72,6 +72,7 @@ struct CmdProcess
 	ICompilerLogger*    m_pLogger;
 	bool				m_bStoreCmdOutput;
 	std::string         m_CmdOutput;
+    FileSystemUtils::Path m_PathTempCLCommandFile;
 };
 
 class PlatformCompilerImplData
@@ -119,9 +120,19 @@ void Compiler::Initialise( ICompilerLogger * pLogger )
 	m_pImplData->m_CmdProcess.m_pLogger = pLogger;
 }
 
+static inline std::string ExpandEnvVars( const std::string& string_ )
+{
+    std::wstring temp = FileSystemUtils::_Win32Utf8ToUtf16( string_ );
+    uint32_t numChars = ExpandEnvironmentStringsW( temp.c_str(), nullptr, 0 );
+    std::wstring tempExpanded;
+    tempExpanded.resize( ++numChars ); // documentation is a little unclear if null character is included
+    uint32_t numCharsExpanded = ExpandEnvironmentStringsW( temp.c_str(), &tempExpanded[0], numChars );
+    return FileSystemUtils::_Win32Utf16ToUtf8( tempExpanded );
+}
+
 void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToCompile_,
 							const CompilerOptions&						compilerOptions_,
-							std::vector<FileSystemUtils::Path>			linkLibraryList_,
+							const std::vector<FileSystemUtils::Path>&	linkLibraryList_,
 							const FileSystemUtils::Path&				moduleName_ )
 {
 	if( m_pImplData->m_bFindVS )
@@ -154,9 +165,9 @@ void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToComp
 	m_pImplData->m_CmdProcess.m_bIsComplete = false;
 	//optimization and c runtime
 #ifdef _DEBUG
-	std::string flags = "/nologo /Z7 /FC /MDd /LDd ";
+	std::string flags = "/nologo /Z7 /FC /utf-8 /MDd /LDd ";
 #else
-	std::string flags = "/nologo /Z7 /FC /MD /LD ";	//also need debug information in release
+	std::string flags = "/nologo /Z7 /FC /utf-8 /MD /LD ";	//also need debug information in release
 #endif
 
 	RCppOptimizationLevel optimizationLevel = GetActualOptimizationLevel( compilerOptions_.optimizationLevel );
@@ -189,6 +200,7 @@ void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToComp
 #endif
 		//send initial set up command
 		m_pImplData->m_CmdProcess.WriteInput(cmdSetParams);
+        m_pImplData->m_CmdProcess.WriteInput( std::string("chcp 65001\n") ); // set utf-8 console locale
 	}
 
 	flags += compilerOptions_.compileOptions;
@@ -201,7 +213,7 @@ void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToComp
 		linkOptions = " /link ";
 		for( size_t i = 0; i < compilerOptions_.libraryDirList.size(); ++i )
 		{
-			linkOptions += " /LIBPATH:\"" + compilerOptions_.libraryDirList[i].m_string + "\"";
+			linkOptions += " /LIBPATH:\"" + ExpandEnvVars( compilerOptions_.libraryDirList[i].m_string ) + "\"";
 		}
 
 		if( bHaveLinkOptions )
@@ -225,7 +237,7 @@ void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToComp
 	std::string strIncludeFiles;
 	for( size_t i = 0; i < compilerOptions_.includeDirList.size(); ++i )
 	{
-		strIncludeFiles += " /I \"" + compilerOptions_.includeDirList[i].m_string + "\"";
+		strIncludeFiles += " /I \"" + ExpandEnvVars( compilerOptions_.includeDirList[i].m_string ) + "\"";
 	}
 
 
@@ -238,7 +250,7 @@ void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToComp
 	std::set<std::string> filteredPaths;
 	for( size_t i = 0; i < filesToCompile_.size(); ++i )
 	{
-		std::string strPath = filesToCompile_[i].m_string;
+		std::string strPath = ExpandEnvVars( filesToCompile_[i].m_string );
 		FileSystemUtils::ToLowerInPlace(strPath);
 
 		std::set<std::string>::const_iterator it = filteredPaths.find(strPath);
@@ -252,7 +264,7 @@ void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToComp
 	std::string strLinkLibraries;
 	for( size_t i = 0; i < linkLibraryList_.size(); ++i )
 	{
-		strLinkLibraries += " \"" + linkLibraryList_[i].m_string + "\" ";
+		strLinkLibraries += " \"" + ExpandEnvVars( linkLibraryList_[i].m_string ) + "\" ";
 	}
 	
 
@@ -265,7 +277,7 @@ void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToComp
 #endif
 
 	std::string compilerLocation = compilerOptions_.compilerLocation.m_string;
-    if (compilerLocation.size()==0){
+    if( compilerLocation.size() == 0 ) {
 #if defined __clang__
 	#ifndef _WIN64
 	std::string arch = "-m32 ";
@@ -279,16 +291,43 @@ void Compiler::RunCompile(	const std::vector<FileSystemUtils::Path>&	filesToComp
 	compilerLocation = "cl ";
 #endif
 	}
+    else if( compilerLocation.back() != ' ' ) {
+        // we need a space at the end
+        compilerLocation += " ";
+    }
 
 	// /MP - use multiple processes to compile if possible. Only speeds up compile for multiple files and not link
-	std::string cmdToSend = compilerLocation + flags + pCharTypeFlags
+	std::string clCommandOptions = flags + pCharTypeFlags
 		+ " /MP /Fo\"" + compilerOptions_.intermediatePath.m_string + "\\\\\" "
 		+ "/D WIN32 /EHa /Fe" + moduleName_.m_string;
-	cmdToSend += " " + strIncludeFiles + " " + strFilesToCompile + strLinkLibraries + linkOptions
-		+ "\necho ";
-	if( m_pImplData->m_pLogger ) m_pImplData->m_pLogger->LogInfo( "%s", cmdToSend.c_str() ); // use %s to prevent any tokens in compile string being interpreted as formating
-	cmdToSend += c_CompletionToken + "\n";
-	m_pImplData->m_CmdProcess.WriteInput( cmdToSend );
+	clCommandOptions += " " + strIncludeFiles + " " + strFilesToCompile + strLinkLibraries + linkOptions;
+	if( m_pImplData->m_pLogger ) m_pImplData->m_pLogger->LogInfo( "%s", clCommandOptions.c_str() ); // use %s to prevent any tokens in compile string being interpreted as formating
+
+    // Write the compile line out to a seperate Command File to allow large line length and also utf-8
+    FileSystemUtils::Path pathTempCLCommandFile = compilerOptions_.intermediatePath / "ClCommandFile.temp";
+    FILE* file = FileSystemUtils::fopen( pathTempCLCommandFile, "wb" );
+    if( file )
+    {
+        m_pImplData->m_CmdProcess.m_PathTempCLCommandFile = pathTempCLCommandFile;
+        uint8_t utf_8_BOM[] = {0xEF,0xBB,0xBF};
+        fwrite( utf_8_BOM, 1, sizeof( utf_8_BOM ), file );
+        fwrite( clCommandOptions.c_str(), 1, clCommandOptions.size(), file );
+        fclose( file );
+	    std::string cmdToSend = compilerLocation + " @" + pathTempCLCommandFile.GetOSShortForm().m_string;
+        cmdToSend += "\necho ";
+	    cmdToSend += c_CompletionToken + "\n";
+	    m_pImplData->m_CmdProcess.WriteInput( cmdToSend );
+    }
+    else
+    {
+    	if( m_pImplData->m_pLogger ) m_pImplData->m_pLogger->LogInfo( "Could not create CL Command File %s\n  - Falling back to command line options\n", pathTempCLCommandFile.c_str() ); // use %s to prevent any tokens in compile string being interpreted as formating
+        // cannot create the file - fallback to command line
+        m_pImplData->m_CmdProcess.m_PathTempCLCommandFile.m_string.clear();
+        std::string cmdToSend = compilerLocation + clCommandOptions;
+        cmdToSend += "\necho ";
+	    cmdToSend += c_CompletionToken + "\n";
+	    m_pImplData->m_CmdProcess.WriteInput( cmdToSend );
+    }
 }
 
 struct VSKey
@@ -700,7 +739,13 @@ void CmdProcess::WriteInput( std::string& input )
 
 void CmdProcess::CleanupProcessAndPipes()
 {
-	// do not reset m_bIsComplete and other members here, just process and pipes
+	// do not reset m_bIsComplete and other members here, just process and pipes and 
+    if( !m_PathTempCLCommandFile.m_string.empty() && m_PathTempCLCommandFile.Exists() )
+    {
+        m_PathTempCLCommandFile.Remove();
+        m_PathTempCLCommandFile.m_string.clear();
+    }
+
 	if( m_CmdProcessInfo.hProcess )
 	{
 		TerminateProcess(m_CmdProcessInfo.hProcess, 0);
